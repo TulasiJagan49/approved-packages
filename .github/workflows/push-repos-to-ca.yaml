@@ -1,10 +1,9 @@
-name: Upload Approved Packages to CodeArtifact
+name: Upload Required Packages to CodeArtifact
 
 on:
   push:
-    branches:
-      - master
-
+    paths:
+      - "required_packages.txt"
 
 jobs:
   upload-packages:
@@ -30,39 +29,35 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install tools
         run: |
           pip install awscli
 
-      - name: Convert required_packages.txt line endings
-        run: sed -i 's/\r$//' required_packages.txt # Use the sed command
-
-      - name: Upload approved packages (source only)
+      - name: Download and upload packages
         run: |
           DOMAIN="${{ secrets.DOMAIN_NAME }}"
           REPO="${{ secrets.REPO_NAME }}"
 
           mkdir -p approved_pkgs
 
-          while IFS= read -r line; do
-            # Skip empty lines or comments
-            if [[ -z "$line" || "$line" =~ ^# ]]; then
-                continue
-            fi
+          echo "Downloading approved packages and their dependencies..."
+          pip download -r required_packages.txt -d approved_pkgs --no-binary=:all:
+
+          echo "Processing downloaded files..."
+          for file in approved_pkgs/*; do
+            fname=$(basename "$file")
             
-            # --- FIX: Use awk for robust parsing based on '==' delimiter ---
-            pkg=$(echo "$line" | awk -F'==' '{print $1}')
-            ver=$(echo "$line" | awk -F'==' '{print $2}')
+            # Normalize package name and version from filename
+            # Example: requests-2.31.0.tar.gz → pkg=requests, ver=2.31.0
+            pkg=$(echo "$fname" | sed -E 's/-[0-9].*//')
+            ver=$(echo "$fname" | sed -E 's/^[^-]+-([0-9][^.]*)\..*/\1/')
 
             if [ -z "$pkg" ] || [ -z "$ver" ]; then
-                echo "Error: Could not parse package/version from line: $line. Skipping."
-                continue
+              echo "Could not parse package/version from $fname, skipping."
+              continue
             fi
 
-            echo "Processing $pkg==$ver ..."
-
-            # Check if package version already exists in CodeArtifact
-            # Use --query for a simpler check
+            echo "Checking $pkg==$ver ..."
             exists=$(aws codeartifact list-package-versions \
               --domain "$DOMAIN" \
               --repository "$REPO" \
@@ -76,30 +71,13 @@ jobs:
               continue
             fi
 
-            # Download only source distribution
-            pip download "$pkg==$ver" -d approved_pkgs --no-binary=:all:
-
-            # --- FIX: Use a robust glob pattern for source distributions (.tar.gz, .zip) ---
-            # Bash globbing needs shopt -s extglob for the {a,b} syntax, but a simple
-            # wildcard search is generally safe here.
-            
-            # Search for files that start with the package name (original or with underscores)
-            # and the version, for both .tar.gz and .zip
-            find approved_pkgs -maxdepth 1 -type f \( -name "${pkg}*.tar.gz" -o -name "${pkg}*.zip" \) -print0 | while IFS= read -r -d $'\0' file; do
-                fname=$(basename "$file")
-                
-                # Double-check filename to ensure it's the correct version
-                if [[ "$fname" =~ $ver ]]; then
-                    echo "Uploading $fname ..."
-                    aws codeartifact publish-package-version \
-                      --domain "$DOMAIN" \
-                      --repository "$REPO" \
-                      --format pypi \
-                      --package "$pkg" \
-                      --package-version "$ver" \
-                      --asset-name "$fname" \
-                      --asset fileb://"$file"
-                fi
-            done
-
-          done < required_packages.txt
+            echo "Uploading $fname ..."
+            aws codeartifact publish-package-version \
+              --domain "$DOMAIN" \
+              --repository "$REPO" \
+              --format pypi \
+              --package "$pkg" \
+              --package-version "$ver" \
+              --asset-name "$fname" \
+              --asset fileb://"$file"
+          done
