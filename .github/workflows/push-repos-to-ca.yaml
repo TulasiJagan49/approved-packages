@@ -42,18 +42,30 @@ jobs:
           mkdir -p approved_pkgs
 
           while IFS= read -r line; do
+            # Skip empty lines or comments
+            if [[ -z "$line" || "$line" =~ ^# ]]; then
+                continue
+            fi
+            
+            # --- FIX: Use awk for robust parsing based on '==' delimiter ---
             pkg=$(echo "$line" | awk -F'==' '{print $1}')
             ver=$(echo "$line" | awk -F'==' '{print $2}')
+
+            if [ -z "$pkg" ] || [ -z "$ver" ]; then
+                echo "Error: Could not parse package/version from line: $line. Skipping."
+                continue
+            fi
 
             echo "Processing $pkg==$ver ..."
 
             # Check if package version already exists in CodeArtifact
+            # Use --query for a simpler check
             exists=$(aws codeartifact list-package-versions \
               --domain "$DOMAIN" \
               --repository "$REPO" \
               --format pypi \
               --package "$pkg" \
-              --query "versions[?version=='$ver']" \
+              --query "versions[?version=='$ver'].version" \
               --output text)
 
             if [ -n "$exists" ]; then
@@ -64,19 +76,27 @@ jobs:
             # Download only source distribution
             pip download "$pkg==$ver" -d approved_pkgs --no-binary=:all:
 
-            # Upload all source artifacts (.tar.gz, .zip)
-            for file in approved_pkgs/${pkg//-/_}-$ver*; do
-              fname=$(basename "$file")
-              echo "Uploading $fname ..."
-              aws codeartifact publish-package-version \
-                --domain "$DOMAIN" \
-                --repository "$REPO" \
-                --format pypi \
-                --package "$pkg" \
-                --package-version "$ver" \
-                --asset-name "$fname" \
-                --asset fileb://"$file"
+            # --- FIX: Use a robust glob pattern for source distributions (.tar.gz, .zip) ---
+            # Bash globbing needs shopt -s extglob for the {a,b} syntax, but a simple
+            # wildcard search is generally safe here.
+            
+            # Search for files that start with the package name (original or with underscores)
+            # and the version, for both .tar.gz and .zip
+            find approved_pkgs -maxdepth 1 -type f \( -name "${pkg}*.tar.gz" -o -name "${pkg}*.zip" \) -print0 | while IFS= read -r -d $'\0' file; do
+                fname=$(basename "$file")
+                
+                # Double-check filename to ensure it's the correct version
+                if [[ "$fname" =~ $ver ]]; then
+                    echo "Uploading $fname ..."
+                    aws codeartifact publish-package-version \
+                      --domain "$DOMAIN" \
+                      --repository "$REPO" \
+                      --format pypi \
+                      --package "$pkg" \
+                      --package-version "$ver" \
+                      --asset-name "$fname" \
+                      --asset fileb://"$file"
+                fi
             done
 
           done < required_packages.txt
-
