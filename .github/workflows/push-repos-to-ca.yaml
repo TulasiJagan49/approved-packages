@@ -116,16 +116,16 @@ jobs:
             # Parse package name and version using Python
             export FNAME="$fname"
             result=$(python3 -c "
-from packaging.utils import canonicalize_name
-import re, sys, os
+              from packaging.utils import canonicalize_name
+              import re, sys, os
 
-fname = os.environ['FNAME']
-fname_no_ext = re.sub(r'(\.tar\.gz|\.zip|\.whl)\$', '', fname)
-parts = fname_no_ext.rsplit('-', maxsplit=1)
-if len(parts) == 2:
-    name, ver = parts
-    print(canonicalize_name(name), ver)
-" 2>/dev/null || echo "")
+              fname = os.environ['FNAME']
+              fname_no_ext = re.sub(r'(\.tar\.gz|\.zip|\.whl)\$', '', fname)
+              parts = fname_no_ext.rsplit('-', maxsplit=1)
+              if len(parts) == 2:
+                  name, ver = parts
+                  print(canonicalize_name(name), ver)
+              " 2>/dev/null || echo "")
 
             read pkg ver <<< "$result"
 
