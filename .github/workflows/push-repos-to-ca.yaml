@@ -4,8 +4,7 @@ on:
   push:
     branches:
       - master
-    paths:
-      - "required_packages.txt"
+
 
 jobs:
   upload-packages:
@@ -22,7 +21,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<CodeArtifactUploaderRole>
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
       - name: Install Python
@@ -36,8 +36,8 @@ jobs:
 
       - name: Upload approved packages (source only)
         run: |
-          DOMAIN="my-domain"
-          REPO="my-pypi-repo"
+          DOMAIN="${{ secrets.DOMAIN_NAME }}"
+          REPO="${{ secrets.REPO_NAME }}"
 
           mkdir -p approved_pkgs
 
