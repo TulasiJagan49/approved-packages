@@ -50,15 +50,19 @@ jobs:
       - name: Determine packages to process
         id: new_packages
         run: |
+          # Keep set -e for strict checking, but make core utility commands non-fatal.
           set -e
           set -x
           ls -l
+          
           # Clean and sort files
-          sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
-          sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
+          # Adding '|| true' to the end of the pipeline ensures set -e does not exit
+          # the script if sort/grep return a non-zero exit code (e.g., if input is empty).
+          sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt || true
+          sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt || true
 
           # Get new packages not yet in lockfile
-          # If comm produces no output, don't fail
+          # This line is already safe due to '|| true'
           comm -23 current.txt lock_sorted.txt > new_packages.txt 2>/dev/null || true
 
           echo "New packages to process:"
@@ -66,8 +70,11 @@ jobs:
 
           # Export to GitHub Actions environment variable
           echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
-          cat new_packages.txt >> $GITHUB_ENV
+          # Use 'cat new_packages.txt || true' to ensure set -e does not fail
+          # if 'cat' somehow returns a non-zero code when appending the EOF marker.
+          cat new_packages.txt || true >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
+
 
       - name: Download and upload new packages
         run: |
