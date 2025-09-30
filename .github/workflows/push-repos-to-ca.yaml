@@ -35,11 +35,24 @@ jobs:
         run: |
           pip install awscli packaging
 
+      - name: Prepare lockfile
+        # This step will create an empty 'approved_packages.lock' only if it 
+        # doesn't exist (i.e., on the very first run of the workflow).
+        # This ensures the file is available for the next step.
+        run: |
+          if [ ! -f approved_packages.lock ]; then
+            echo "Creating empty approved_packages.lock file."
+            touch approved_packages.lock
+          else
+            echo "approved_packages.lock already exists."
+          fi
+
       - name: Determine packages to process
         id: new_packages
         run: |
           set -e
           set -x
+          ls -l
           # Clean and sort files
           sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
           sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
