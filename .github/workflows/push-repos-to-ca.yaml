@@ -1,4 +1,4 @@
-name: Upload Required Packages to CodeArtifact
+name: Upload Required Packages to CodeArtifact with Lockfile
 
 on:
   push:
@@ -10,12 +10,14 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Needed to get previous commit
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -31,26 +33,66 @@ jobs:
 
       - name: Install tools
         run: |
-          pip install awscli
+          pip install awscli packaging
 
-      - name: Download and upload packages
+      - name: Prepare lockfile
+        run: |
+          LOCKFILE=approved_packages.lock
+          touch $LOCKFILE
+
+      - name: Determine packages to process
+        id: new_packages
+        run: |
+          # Ignore empty lines or comments
+          sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
+          sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
+
+          # Get new packages not yet in lockfile
+          comm -23 current.txt lock_sorted.txt > new_packages.txt || true
+          echo "New packages to process:"
+          cat new_packages.txt
+
+          echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
+          cat new_packages.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Download and upload new packages
         run: |
           DOMAIN="${{ secrets.DOMAIN_NAME }}"
           REPO="${{ secrets.REPO_NAME }}"
 
           mkdir -p approved_pkgs
 
-          echo "Downloading approved packages and their dependencies..."
-          pip download -r required_packages.txt -d approved_pkgs --no-binary=:all:
+          if [ -z "$NEW_PACKAGES" ]; then
+            echo "No new packages to process."
+            exit 0
+          fi
+
+          echo "$NEW_PACKAGES" | while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+
+            # Download package and dependencies
+            pip download "$line" -d approved_pkgs --no-binary=:all:
+          done
 
           echo "Processing downloaded files..."
           for file in approved_pkgs/*; do
             fname=$(basename "$file")
-            
-            # Normalize package name and version from filename
-            # Example: requests-2.31.0.tar.gz → pkg=requests, ver=2.31.0
-            pkg=$(echo "$fname" | sed -E 's/-[0-9].*//')
-            ver=$(echo "$fname" | sed -E 's/^[^-]+-([0-9][^.]*)\..*/\1/')
+
+            # Parse package name and version reliably
+            read pkg ver <<< $(python3 - <<END
+              from packaging.utils import canonicalize_name
+              import re, sys
+
+              fname = "$fname"
+              fname_no_ext = re.sub(r'(\.tar\.gz|\.zip|\.whl)$', '', fname)
+              parts = fname_no_ext.rsplit('-', maxsplit=1)
+              if len(parts) != 2:
+                  sys.exit()
+              name, ver = parts
+              print(canonicalize_name(name), ver)
+              END
+            )
 
             if [ -z "$pkg" ] || [ -z "$ver" ]; then
               echo "Could not parse package/version from $fname, skipping."
@@ -64,7 +106,7 @@ jobs:
               --format pypi \
               --package "$pkg" \
               --query "versions[?version=='$ver'].version" \
-              --output text)
+              --output text 2>/dev/null || true)
 
             if [ -n "$exists" ]; then
               echo "$pkg==$ver already exists, skipping."
@@ -80,4 +122,14 @@ jobs:
               --package-version "$ver" \
               --asset-name "$fname" \
               --asset fileb://"$file"
+
+            # Append successfully uploaded package to lockfile
+            echo "$pkg==$ver" >> approved_packages.lock
           done
+
+      - name: Commit updated lockfile
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Update approved_packages.lock with newly uploaded packages"
+          file_pattern: approved_packages.lock
+          branch: master
