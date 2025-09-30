@@ -36,9 +36,6 @@ jobs:
           pip install awscli packaging
 
       - name: Prepare lockfile
-        # This step will create an empty 'approved_packages.lock' only if it 
-        # doesn't exist (i.e., on the very first run of the workflow).
-        # This ensures the file is available for the next step.
         run: |
           if [ ! -f approved_packages.lock ]; then
             echo "Creating empty approved_packages.lock file."
@@ -50,37 +47,42 @@ jobs:
       - name: Determine packages to process
         id: new_packages
         run: |
-          # Keep set -e for strict checking, but make core utility commands non-fatal.
           set -e
           set -x
           ls -l
           
           # Clean and sort files
-          # Adding '|| true' to the end of the pipeline ensures set -e does not exit
-          # the script if sort/grep return a non-zero exit code (e.g., if input is empty).
           sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt || true
           sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt || true
 
+          # Validate package format in required_packages.txt
+          while IFS= read -r line; do
+            if [[ ! "$line" =~ ^[a-zA-Z0-9_-]+==[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+              echo "Error: Invalid package format in required_packages.txt: '$line'"
+              exit 1
+            fi
+          done < current.txt
+
           # Get new packages not yet in lockfile
-          # This line is already safe due to '|| true'
           comm -23 current.txt lock_sorted.txt > new_packages.txt 2>/dev/null || true
 
           echo "New packages to process:"
           cat new_packages.txt || echo "(none)"
 
-          # Export to GitHub Actions environment variable
-          echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
-          # Use 'cat new_packages.txt || true' to ensure set -e does not fail
-          # if 'cat' somehow returns a non-zero code when appending the EOF marker.
-          cat new_packages.txt || true >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
+          # Ensure NEW_PACKAGES is clean and properly formatted
+          if [ -s new_packages.txt ]; then
+            # Remove any empty lines or comments, and join with newlines
+            NEW_PACKAGES=$(cat new_packages.txt | grep -vE '^\s*#|^\s*$' | tr '\n' '\n')
+            echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
+            echo -n "$NEW_PACKAGES" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "NEW_PACKAGES=" >> $GITHUB_ENV
+          fi
 
       - name: Download and upload new packages
         run: |
-
-          PACKAGES_TO_PROCESS="${{ env.NEW_PACKAGES }}" 
-    
+          PACKAGES_TO_PROCESS="${{ env.NEW_PACKAGES }}"
           DOMAIN="${{ secrets.DOMAIN_NAME }}"
           REPO="${{ secrets.REPO_NAME }}"
 
@@ -91,17 +93,24 @@ jobs:
             exit 0
           fi
 
-          echo "Packages found: $PACKAGES_TO_PROCESS"
+          echo "Packages to process:"
+          echo "$PACKAGES_TO_PROCESS"
 
+          # Process each package with error handling
           echo "$PACKAGES_TO_PROCESS" | while IFS= read -r line; do
+            # Skip empty lines or comments
             [[ -z "$line" || "$line" =~ ^# ]] && continue
 
-            # Download package and dependencies
-            pip download "$line" -d approved_pkgs --no-binary=:all:
+            echo "Downloading package: $line"
+            if ! pip download "$line" -d approved_pkgs --no-binary=:all:; then
+              echo "Error: Failed to download package '$line'. Continuing with next package."
+              continue
+            fi
           done
 
           echo "Processing downloaded files..."
           for file in approved_pkgs/*; do
+            [ -f "$file" ] || continue  # Skip if no files exist
             fname=$(basename "$file")
 
             # Parse package name and version reliably
@@ -120,7 +129,7 @@ jobs:
             )
 
             if [ -z "$pkg" ] || [ -z "$ver" ]; then
-              echo "Could not parse package/version from $fname, skipping."
+              echo "Error: Could not parse package/version from '$fname', skipping."
               continue
             fi
 
@@ -139,17 +148,20 @@ jobs:
             fi
 
             echo "Uploading $fname ..."
-            aws codeartifact publish-package-version \
+            if aws codeartifact publish-package-version \
               --domain "$DOMAIN" \
               --repository "$REPO" \
               --format pypi \
               --package "$pkg" \
               --package-version "$ver" \
               --asset-name "$fname" \
-              --asset fileb://"$file"
-
-            # Append successfully uploaded package to lockfile
-            echo "$pkg==$ver" >> approved_packages.lock
+              --asset fileb://"$file"; then
+              echo "Successfully uploaded $pkg==$ver"
+              # Append successfully uploaded package to lockfile
+              echo "$pkg==$ver" >> approved_packages.lock
+            else
+              echo "Error: Failed to upload $pkg==$ver"
+            fi
           done
 
       - name: Commit updated lockfile
