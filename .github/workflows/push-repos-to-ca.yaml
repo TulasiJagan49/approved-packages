@@ -72,7 +72,7 @@ jobs:
           # Ensure NEW_PACKAGES is clean and properly formatted
           if [ -s new_packages.txt ]; then
             # Remove any empty lines or comments, and join with newlines
-            NEW_PACKAGES=$(cat new_packages.txt | grep -vE '^\s*#|^\s*$' | tr '\n' '\n')
+            NEW_PACKAGES=$(cat new_packages.txt | grep -vE '^\s*#|^\s*$')
             echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
             echo "$NEW_PACKAGES" >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
@@ -81,11 +81,11 @@ jobs:
           fi
 
       - name: Download and upload new packages
+        env:
+          PACKAGES_TO_PROCESS: ${{ env.NEW_PACKAGES }}
+          DOMAIN: ${{ secrets.DOMAIN_NAME }}
+          REPO: ${{ secrets.REPO_NAME }}
         run: |
-          PACKAGES_TO_PROCESS="${{ env.NEW_PACKAGES }}"
-          DOMAIN="${{ secrets.DOMAIN_NAME }}"
-          REPO="${{ secrets.REPO_NAME }}"
-
           mkdir -p approved_pkgs
 
           if [ -z "$PACKAGES_TO_PROCESS" ]; then
@@ -110,23 +110,24 @@ jobs:
 
           echo "Processing downloaded files..."
           for file in approved_pkgs/*; do
-            [ -f "$file" ] || continue  # Skip if no files exist
+            [ -f "$file" ] || continue
             fname=$(basename "$file")
 
-            # Parse package name and version reliably
-            read pkg ver <<< $(python3 - <<'PYTHON_END'
-              from packaging.utils import canonicalize_name
-              import re, sys, os
+            # Parse package name and version using Python
+            export FNAME="$fname"
+            result=$(python3 -c "
+from packaging.utils import canonicalize_name
+import re, sys, os
 
-              fname = os.environ.get('FNAME', '')
-              fname_no_ext = re.sub(r'(\.tar\.gz|\.zip|\.whl)$', '', fname)
-              parts = fname_no_ext.rsplit('-', maxsplit=1)
-              if len(parts) != 2:
-                  sys.exit()
-              name, ver = parts
-              print(canonicalize_name(name), ver)
-              PYTHON_END
-            )
+fname = os.environ['FNAME']
+fname_no_ext = re.sub(r'(\.tar\.gz|\.zip|\.whl)\$', '', fname)
+parts = fname_no_ext.rsplit('-', maxsplit=1)
+if len(parts) == 2:
+    name, ver = parts
+    print(canonicalize_name(name), ver)
+" 2>/dev/null || echo "")
+
+            read pkg ver <<< "$result"
 
             if [ -z "$pkg" ] || [ -z "$ver" ]; then
               echo "Error: Could not parse package/version from '$fname', skipping."
@@ -157,7 +158,6 @@ jobs:
               --asset-name "$fname" \
               --asset fileb://"$file"; then
               echo "Successfully uploaded $pkg==$ver"
-              # Append successfully uploaded package to lockfile
               echo "$pkg==$ver" >> approved_packages.lock
             else
               echo "Error: Failed to upload $pkg==$ver"
