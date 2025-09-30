@@ -78,17 +78,22 @@ jobs:
 
       - name: Download and upload new packages
         run: |
+
+          PACKAGES_TO_PROCESS="${{ env.NEW_PACKAGES }}" 
+    
           DOMAIN="${{ secrets.DOMAIN_NAME }}"
           REPO="${{ secrets.REPO_NAME }}"
 
           mkdir -p approved_pkgs
 
-          if [ -z "$NEW_PACKAGES" ]; then
+          if [ -z "$PACKAGES_TO_PROCESS" ]; then
             echo "No new packages to process."
             exit 0
           fi
 
-          echo "$NEW_PACKAGES" | while IFS= read -r line; do
+          echo "Packages found: $PACKAGES_TO_PROCESS"
+
+          echo "$PACKAGES_TO_PROCESS" | while IFS= read -r line; do
             [[ -z "$line" || "$line" =~ ^# ]] && continue
 
             # Download package and dependencies
