@@ -43,15 +43,21 @@ jobs:
       - name: Determine packages to process
         id: new_packages
         run: |
-          # Ignore empty lines or comments
+          LOCKFILE=approved_packages.lock
+          touch $LOCKFILE
+
+          # Clean and sort files
           sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
-          sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
+          sort $LOCKFILE | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
 
           # Get new packages not yet in lockfile
-          comm -23 current.txt lock_sorted.txt > new_packages.txt || true
-          echo "New packages to process:"
-          cat new_packages.txt
+          # If comm produces no output, don't fail
+          comm -23 current.txt lock_sorted.txt > new_packages.txt 2>/dev/null || true
 
+          echo "New packages to process:"
+          cat new_packages.txt || echo "(none)"
+
+          # Export to GitHub Actions environment variable
           echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
           cat new_packages.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
