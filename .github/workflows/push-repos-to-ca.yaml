@@ -34,6 +34,9 @@ jobs:
         run: |
           pip install awscli
 
+      - name: Convert required_packages.txt line endings
+        run: sed -i 's/\r$//' required_packages.txt # Use the sed command
+
       - name: Upload approved packages (source only)
         run: |
           DOMAIN="${{ secrets.DOMAIN_NAME }}"
