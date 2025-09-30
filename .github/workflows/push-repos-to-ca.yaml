@@ -74,7 +74,7 @@ jobs:
             # Remove any empty lines or comments, and join with newlines
             NEW_PACKAGES=$(cat new_packages.txt | grep -vE '^\s*#|^\s*$' | tr '\n' '\n')
             echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
-            echo -n "$NEW_PACKAGES" >> $GITHUB_ENV
+            echo "$NEW_PACKAGES" >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
           else
             echo "NEW_PACKAGES=" >> $GITHUB_ENV
