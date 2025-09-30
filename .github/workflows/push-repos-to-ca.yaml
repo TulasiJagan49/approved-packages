@@ -38,6 +38,8 @@ jobs:
       - name: Determine packages to process
         id: new_packages
         run: |
+          set -e
+          set -x
           # Clean and sort files
           sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
           sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
