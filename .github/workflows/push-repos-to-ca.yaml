@@ -2,8 +2,8 @@ name: Upload Required Packages to CodeArtifact
 
 on:
   push:
-    paths:
-      - "required_packages.txt"
+    branches:
+      - master
 
 jobs:
   upload-packages:
