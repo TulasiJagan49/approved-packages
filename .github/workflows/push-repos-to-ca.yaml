@@ -45,6 +45,7 @@ jobs:
         run: |
           set -x
           set -e
+          ls
           # Clean and sort files
           sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
           sort $LOCKFILE | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
