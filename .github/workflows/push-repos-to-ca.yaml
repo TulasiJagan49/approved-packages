@@ -42,8 +42,8 @@ jobs:
           mkdir -p approved_pkgs
 
           while IFS= read -r line; do
-            pkg=$(echo "$line" | cut -d= -f1)
-            ver=$(echo "$line" | cut -d= -f3)
+            pkg=$(echo "$line" | awk -F'==' '{print $1}')
+            ver=$(echo "$line" | awk -F'==' '{print $2}')
 
             echo "Processing $pkg==$ver ..."
 
