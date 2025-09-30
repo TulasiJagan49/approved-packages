@@ -43,9 +43,6 @@ jobs:
       - name: Determine packages to process
         id: new_packages
         run: |
-          LOCKFILE=approved_packages.lock
-          touch $LOCKFILE
-
           # Clean and sort files
           sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
           sort $LOCKFILE | grep -vE '^\s*#|^\s*$' > lock_sorted.txt
