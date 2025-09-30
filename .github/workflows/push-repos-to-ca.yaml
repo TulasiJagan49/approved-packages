@@ -78,5 +78,5 @@ jobs:
                 --asset fileb://"$file"
             done
 
-          done < approved_packages.txt
+          done < required_packages.txt
 
