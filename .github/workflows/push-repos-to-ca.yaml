@@ -112,7 +112,9 @@ jobs:
             --repository "$REPO" \
             --format pypi \
             --query repositoryEndpoint \
-            --output text)simple/
+            --output text)
+          
+          echo "Repository URL: $TWINE_REPOSITORY_URL"
 
           echo "Processing downloaded files..."
           for file in approved_pkgs/*; do
