@@ -147,7 +147,7 @@ jobs:
             # Calculate SHA256 hash of the file
             file_sha256=$(sha256sum "$file" | awk '{print $1}')
             echo "SHA256: $file_sha256"
-            
+            echo "fileb://$file"
             if aws codeartifact publish-package-version \
               --domain "$DOMAIN" \
               --repository "$REPO" \
