@@ -33,7 +33,7 @@ jobs:
 
       - name: Install tools
         run: |
-          pip install awscli packaging
+          pip install awscli twine
 
       - name: Prepare lockfile
         run: |
@@ -101,21 +101,31 @@ jobs:
             fi
           done
 
+          # Get CodeArtifact repository endpoint and credentials
+          export TWINE_USERNAME=aws
+          export TWINE_PASSWORD=$(aws codeartifact get-authorization-token \
+            --domain "$DOMAIN" \
+            --query authorizationToken \
+            --output text)
+          export TWINE_REPOSITORY_URL=$(aws codeartifact get-repository-endpoint \
+            --domain "$DOMAIN" \
+            --repository "$REPO" \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)simple/
+
           echo "Processing downloaded files..."
           for file in approved_pkgs/*; do
             [ -f "$file" ] || continue
             fname=$(basename "$file")
 
             # Extract package name and version using bash
-            # Remove .tar.gz extension (only source tarballs are downloaded)
             base_name="${fname%.tar.gz}"
             
-            # Split on last hyphen to get name and version
             if [[ "$base_name" =~ ^(.+)-([0-9]+\.[0-9]+.*)$ ]]; then
               pkg_raw="${BASH_REMATCH[1]}"
               ver="${BASH_REMATCH[2]}"
               
-              # Normalize package name (lowercase, replace _ and - with -)
               pkg=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
               
               echo "Parsed: $fname -> package=$pkg, version=$ver"
@@ -143,20 +153,8 @@ jobs:
               continue
             fi
 
-            echo "Uploading $fname ..."
-            # Calculate SHA256 hash of the file
-            file_sha256=$(sha256sum "$file" | awk '{print $1}')
-            echo "SHA256: $file_sha256"
-            
-            if aws codeartifact publish-package-version \
-              --domain "$DOMAIN" \
-              --repository "$REPO" \
-              --format pypi \
-              --package "$pkg" \
-              --package-version "$ver" \
-              --asset-name "$fname" \
-              --asset-content "$file" \
-              --asset-sha256 "$file_sha256"; then
+            echo "Uploading $fname using twine..."
+            if twine upload --skip-existing "$file"; then
               echo "Successfully uploaded $pkg==$ver"
               echo "$pkg==$ver" >> approved_packages.lock
             else
