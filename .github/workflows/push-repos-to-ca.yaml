@@ -154,7 +154,7 @@ jobs:
             fi
 
             echo "Uploading $fname using twine..."
-            if twine upload --skip-existing "$file"; then
+            if twine upload "$file"; then
               echo "Successfully uploaded $pkg==$ver"
               echo "$pkg==$ver" >> approved_packages.lock
             else
