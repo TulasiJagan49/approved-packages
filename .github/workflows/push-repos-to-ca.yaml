@@ -155,7 +155,7 @@ jobs:
               --package "$pkg" \
               --package-version "$ver" \
               --asset-name "$fname" \
-              --asset-content fileb://"$file" \
+              --asset-content "$file" \
               --asset-sha256 "$file_sha256"; then
               echo "Successfully uploaded $pkg==$ver"
               echo "$pkg==$ver" >> approved_packages.lock
