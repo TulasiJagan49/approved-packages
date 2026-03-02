@@ -6,6 +6,7 @@ on:
       - master
     paths:
       - required_packages.txt
+  workflow_dispatch:
 
 # Prevent concurrent runs from writing to the lockfile simultaneously
 concurrency:
