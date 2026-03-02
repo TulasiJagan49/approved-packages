@@ -169,7 +169,23 @@ jobs:
 
             pkg=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
 
-            if twine upload --skip-existing "$file"; then
+            exists=$(aws codeartifact list-package-versions \
+              --domain "$DOMAIN" \
+              --repository "$REPO" \
+              --format pypi \
+              --package "$pkg" \
+              --query "versions[?version=='$ver'].version" \
+              --output text 2>/dev/null || true)
+
+            if [ -n "$exists" ]; then
+              echo "Skipping $fname: $pkg==$ver already exists in CodeArtifact"
+              if [[ "$fname" == *.tar.gz ]]; then
+                echo "$pkg==$ver" >> approved_packages.lock
+              fi
+              continue
+            fi
+
+            if twine upload "$file"; then
               echo "Uploaded: $fname"
               # Only record source dists — wheels are additional assets for the same version
               if [[ "$fname" == *.tar.gz ]]; then
