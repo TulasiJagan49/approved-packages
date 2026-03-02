@@ -1,9 +1,16 @@
-name: Upload Required Packages to CodeArtifact with Lockfile
+name: Upload Public Packages to CodeArtifact
 
 on:
   push:
     branches:
       - master
+    paths:
+      - required_packages.txt
+
+# Prevent concurrent runs from writing to the lockfile simultaneously
+concurrency:
+  group: codeartifact-lockfile
+  cancel-in-progress: false
 
 jobs:
   upload-packages:
@@ -16,8 +23,6 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -32,137 +37,154 @@ jobs:
           python-version: "3.11"
 
       - name: Install tools
-        run: |
-          pip install awscli twine
+        run: pip install twine
 
-      - name: Prepare lockfile
-        run: |
-          if [ ! -f approved_packages.lock ]; then
-            echo "Creating empty approved_packages.lock file."
-            touch approved_packages.lock
-          else
-            echo "approved_packages.lock already exists."
-          fi
-
-      - name: Determine packages to process
-        id: new_packages
+      - name: Determine new packages
+        id: determine
         run: |
           set -e
-          set -x
-          ls -l
-          
-          sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt || true
-          sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt || true
 
+          sort required_packages.txt | grep -vE '^\s*#|^\s*$' > current.txt
+          sort approved_packages.lock | grep -vE '^\s*#|^\s*$' > lock_sorted.txt 2>/dev/null || touch lock_sorted.txt
+
+          # Validate format: only package==version entries are accepted
           while IFS= read -r line; do
-            if [[ ! "$line" =~ ^[a-zA-Z0-9_-]+==[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-              echo "Error: Invalid package format in required_packages.txt: '$line'"
+            if [[ ! "$line" =~ ^[a-zA-Z0-9_.-]+==[0-9].+$ ]]; then
+              echo "Error: Invalid format in required_packages.txt: '$line'"
+              echo "Expected: package-name==version (e.g. requests==2.32.5)"
               exit 1
             fi
           done < current.txt
 
-          comm -23 current.txt lock_sorted.txt > new_packages.txt 2>/dev/null || true
-
-          echo "New packages to process:"
-          cat new_packages.txt || echo "(none)"
+          comm -23 current.txt lock_sorted.txt > new_packages.txt
 
           if [ -s new_packages.txt ]; then
-            NEW_PACKAGES=$(cat new_packages.txt | grep -vE '^\s*#|^\s*$')
-            echo "NEW_PACKAGES<<EOF" >> $GITHUB_ENV
-            echo "$NEW_PACKAGES" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
+            echo "New packages to process:"
+            cat new_packages.txt
+            echo "has_new=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "NEW_PACKAGES<<EOF"
+              cat new_packages.txt
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           else
-            echo "NEW_PACKAGES=" >> $GITHUB_ENV
+            echo "No new packages to process."
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download and upload new packages
+      - name: Download packages
+        if: steps.determine.outputs.has_new == 'true'
         env:
           PACKAGES_TO_PROCESS: ${{ env.NEW_PACKAGES }}
+        run: |
+          set -e
+          mkdir -p approved_pkgs
+
+          # Sort by package name then version ascending.
+          # This ensures the highest version of each package is always uploaded last,
+          # which fixes CodeArtifact marking the most-recently-uploaded as "latest"
+          # instead of the highest semantic version.
+          SORTED_PACKAGES=$(echo "$PACKAGES_TO_PROCESS" | sort -t'=' -k1,1 -k3,3V)
+
+          DOWNLOAD_FAILED=0
+          while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+
+            echo "--- Downloading: $line ---"
+
+            # Source dist: platform-independent fallback — required, failure aborts
+            if ! pip download "$line" -d approved_pkgs --no-binary=:all:; then
+              echo "Error: Failed to download source dist for '$line'."
+              DOWNLOAD_FAILED=1
+            fi
+
+            # Pre-built wheels for common platforms and Python versions (best-effort).
+            # Consumers get fast installs; platforms with no wheel fall back to source dist.
+            for python_ver in 311 312; do
+              abi="cp${python_ver}"
+              for platform in manylinux2014_x86_64 manylinux2014_aarch64 macosx_11_0_arm64 macosx_10_9_x86_64 win_amd64; do
+                pip download "$line" -d approved_pkgs \
+                  --only-binary=:all: \
+                  --platform "$platform" \
+                  --python-version "$python_ver" \
+                  --implementation cp \
+                  --abi "$abi" \
+                  >/dev/null 2>&1 || true
+              done
+            done
+          done < <(echo "$SORTED_PACKAGES")
+
+          if [ "$DOWNLOAD_FAILED" -ne 0 ]; then
+            echo "One or more source dists failed to download. Aborting."
+            exit 1
+          fi
+
+      - name: Upload to CodeArtifact
+        if: steps.determine.outputs.has_new == 'true'
+        env:
           DOMAIN: ${{ secrets.DOMAIN_NAME }}
           REPO: ${{ secrets.REPO_NAME }}
         run: |
-          mkdir -p approved_pkgs
+          set -e
 
-          if [ -z "$PACKAGES_TO_PROCESS" ]; then
-            echo "No new packages to process."
-            exit 0
-          fi
-
-          echo "Packages to process:"
-          echo "$PACKAGES_TO_PROCESS"
-
-          echo "$PACKAGES_TO_PROCESS" | while IFS= read -r line; do
-            [[ -z "$line" || "$line" =~ ^# ]] && continue
-
-            echo "Downloading package: $line"
-            if ! pip download "$line" -d approved_pkgs --no-binary=:all:; then
-              echo "Error: Failed to download package '$line'. Continuing with next package."
-              continue
-            fi
-          done
-
-          # Get CodeArtifact repository endpoint and credentials
-          export TWINE_USERNAME=aws
-          export TWINE_PASSWORD=$(aws codeartifact get-authorization-token \
+          TOKEN=$(aws codeartifact get-authorization-token \
             --domain "$DOMAIN" \
             --query authorizationToken \
             --output text)
+          echo "::add-mask::$TOKEN"
+          export TWINE_USERNAME=aws
+          export TWINE_PASSWORD="$TOKEN"
           export TWINE_REPOSITORY_URL=$(aws codeartifact get-repository-endpoint \
             --domain "$DOMAIN" \
             --repository "$REPO" \
             --format pypi \
             --query repositoryEndpoint \
             --output text)
-          
+
           echo "Repository URL: $TWINE_REPOSITORY_URL"
 
-          echo "Processing downloaded files..."
-          for file in approved_pkgs/*; do
+          # Upload source dists first (version ascending), then wheels (version ascending).
+          # Ascending order guarantees the highest version is the last upload per package,
+          # keeping the CodeArtifact "latest" tag on the correct version.
+          UPLOAD_FAILED=0
+          for file in $(ls approved_pkgs/*.tar.gz 2>/dev/null | sort -V) \
+                      $(ls approved_pkgs/*.whl 2>/dev/null | sort -V); do
             [ -f "$file" ] || continue
             fname=$(basename "$file")
 
-            # Extract package name and version using bash
-            base_name="${fname%.tar.gz}"
-            
-            if [[ "$base_name" =~ ^(.+)-([0-9]+\.[0-9]+.*)$ ]]; then
-              pkg_raw="${BASH_REMATCH[1]}"
-              ver="${BASH_REMATCH[2]}"
-              
-              pkg=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
-              
-              echo "Parsed: $fname -> package=$pkg, version=$ver"
+            if [[ "$fname" == *.whl ]]; then
+              base_name="${fname%.whl}"
+              pkg_raw=$(echo "$base_name" | cut -d'-' -f1)
+              ver=$(echo "$base_name" | cut -d'-' -f2)
+            elif [[ "$fname" == *.tar.gz ]]; then
+              base_name="${fname%.tar.gz}"
+              if [[ "$base_name" =~ ^(.+)-([0-9]+\.[0-9]+.*)$ ]]; then
+                pkg_raw="${BASH_REMATCH[1]}"
+                ver="${BASH_REMATCH[2]}"
+              else
+                echo "Warning: Could not parse '$fname', skipping."
+                continue
+              fi
+            fi
+
+            pkg=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+
+            if twine upload --skip-existing "$file"; then
+              echo "Uploaded: $fname"
+              # Only record source dists — wheels are additional assets for the same version
+              if [[ "$fname" == *.tar.gz ]]; then
+                echo "$pkg==$ver" >> approved_packages.lock
+              fi
             else
-              echo "Error: Could not parse package/version from '$fname', skipping."
-              continue
-            fi
-
-            if [ -z "$pkg" ] || [ -z "$ver" ]; then
-              echo "Error: Empty package or version from '$fname', skipping."
-              continue
-            fi
-
-            echo "Checking $pkg==$ver ..."
-            exists=$(aws codeartifact list-package-versions \
-              --domain "$DOMAIN" \
-              --repository "$REPO" \
-              --format pypi \
-              --package "$pkg" \
-              --query "versions[?version=='$ver'].version" \
-              --output text 2>/dev/null || true)
-
-            if [ -n "$exists" ]; then
-              echo "$pkg==$ver already exists, skipping."
-              continue
-            fi
-
-            echo "Uploading $fname using twine..."
-            if twine upload "$file"; then
-              echo "Successfully uploaded $pkg==$ver"
-              echo "$pkg==$ver" >> approved_packages.lock
-            else
-              echo "Error: Failed to upload $pkg==$ver"
+              echo "Error: Failed to upload $fname"
+              UPLOAD_FAILED=1
             fi
           done
+
+          if [ "$UPLOAD_FAILED" -ne 0 ]; then
+            echo "One or more uploads failed."
+            exit 1
+          fi
 
       - name: Commit updated lockfile
         uses: stefanzweifel/git-auto-commit-action@v4
