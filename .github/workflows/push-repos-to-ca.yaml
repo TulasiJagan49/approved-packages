@@ -81,12 +81,30 @@ jobs:
           set -e
           mkdir -p approved_pkgs
 
+          # Shared helper: download pre-built wheels for a package across common platforms
+          download_wheels() {
+            local pkg="$1"
+            for python_ver in 311 312; do
+              local abi="cp${python_ver}"
+              for platform in manylinux2014_x86_64 manylinux2014_aarch64 macosx_11_0_arm64 macosx_10_9_x86_64 win_amd64; do
+                pip download "$pkg" -d approved_pkgs \
+                  --only-binary=:all: \
+                  --platform "$platform" \
+                  --python-version "$python_ver" \
+                  --implementation cp \
+                  --abi "$abi" \
+                  >/dev/null 2>&1 || true
+              done
+            done
+          }
+
           # Sort by package name then version ascending.
           # This ensures the highest version of each package is always uploaded last,
           # which fixes CodeArtifact marking the most-recently-uploaded as "latest"
           # instead of the highest semantic version.
           SORTED_PACKAGES=$(echo "$PACKAGES_TO_PROCESS" | sort -t'=' -k1,1 -k3,3V)
 
+          # Phase 1: download explicitly requested packages (source dist + wheels)
           DOWNLOAD_FAILED=0
           while IFS= read -r line; do
             [[ -z "$line" || "$line" =~ ^# ]] && continue
@@ -97,27 +115,41 @@ jobs:
             if ! pip download "$line" -d approved_pkgs --no-binary=:all:; then
               echo "Error: Failed to download source dist for '$line'."
               DOWNLOAD_FAILED=1
+              continue
             fi
 
             # Pre-built wheels for common platforms and Python versions (best-effort).
             # Consumers get fast installs; platforms with no wheel fall back to source dist.
-            for python_ver in 311 312; do
-              abi="cp${python_ver}"
-              for platform in manylinux2014_x86_64 manylinux2014_aarch64 macosx_11_0_arm64 macosx_10_9_x86_64 win_amd64; do
-                pip download "$line" -d approved_pkgs \
-                  --only-binary=:all: \
-                  --platform "$platform" \
-                  --python-version "$python_ver" \
-                  --implementation cp \
-                  --abi "$abi" \
-                  >/dev/null 2>&1 || true
-              done
-            done
+            download_wheels "$line"
           done < <(echo "$SORTED_PACKAGES")
 
           if [ "$DOWNLOAD_FAILED" -ne 0 ]; then
             echo "One or more source dists failed to download. Aborting."
             exit 1
+          fi
+
+          # Phase 2: scan every downloaded source dist for build backend dependencies
+          # (e.g. flit_core, hatchling, poetry-core) and download those too.
+          # This prevents "Could not find a version that satisfies the requirement X"
+          # errors when pip tries to build a package from source inside CodeArtifact.
+          echo "--- Scanning source dists for build backend dependencies ---"
+          build_deps_raw=""
+          for tarball in approved_pkgs/*.tar.gz; do
+            [ -f "$tarball" ] || continue
+            deps=$(python3 scripts/get_build_deps.py "$tarball" 2>/dev/null || true)
+            [ -z "$deps" ] && continue
+            echo "  $(basename "$tarball"): $(echo "$deps" | tr '\n' ' ')"
+            build_deps_raw+=$'\n'"$deps"
+          done
+
+          if [ -n "$build_deps_raw" ]; then
+            echo "--- Downloading build backend dependencies ---"
+            while IFS= read -r dep; do
+              [ -z "$dep" ] && continue
+              echo "  [build-dep] $dep"
+              pip download "$dep" -d approved_pkgs --no-binary=:all: >/dev/null 2>&1 || true
+              download_wheels "$dep"
+            done < <(echo "$build_deps_raw" | sort -u)
           fi
 
       - name: Upload to CodeArtifact
